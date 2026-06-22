@@ -1,0 +1,572 @@
+"""
+پروژه 4: نرم‌افزار تحلیل پاسخ سیستم‌های مرتبه اول و دوم
+درس: برنامه‌نویسی پیشرفته
+شماره دانشجویی: 03220040709006
+a = 6
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import math
+import numpy as np
+
+
+# ─────────────────────────────────────────────
+# کلاس TransferFunction
+# ─────────────────────────────────────────────
+class TransferFunction:
+    """
+    مدل تابع تبدیل سیستم مرتبه اول و دوم.
+
+    مرتبه اول:  G(s) = K / (τs + 1)
+    مرتبه دوم:  G(s) = K·ωn² / (s² + 2ζωn·s + ωn²)
+    """
+
+    def __init__(self, order: int, K: float,
+                 zeta: float = 0.0, omega_n: float = 1.0, tau: float = 1.0):
+        if order not in (1, 2):
+            raise ValueError("order باید 1 یا 2 باشد.")
+        self.order = order
+        self.K = K
+        self.zeta = zeta          # ضریب میرایی (مرتبه دوم)
+        self.omega_n = omega_n    # فرکانس طبیعی (مرتبه دوم)
+        self.tau = tau            # ثابت زمانی (مرتبه اول)
+
+    def __repr__(self):
+        if self.order == 1:
+            return f"G(s) = {self.K} / ({self.tau}s + 1)"
+        return (f"G(s) = {self.K}·{self.omega_n:.3f}² / "
+                f"(s² + 2·{self.zeta:.3f}·{self.omega_n:.3f}·s + {self.omega_n:.3f}²)")
+
+
+# ─────────────────────────────────────────────
+# کلاس StepResponse
+# ─────────────────────────────────────────────
+class StepResponse:
+    """
+    محاسبه پاسخ پله سیستم به‌صورت عددی (Euler) و تحلیلی.
+    """
+
+    def __init__(self, tf: TransferFunction, t_end: float = 20.0, dt: float = 0.01):
+        self.tf = tf
+        self.t_end = t_end
+        self.dt = dt
+        self.time: list[float] = []
+        self.output: list[float] = []
+
+    def compute(self):
+        tf = self.tf
+        t = np.arange(0, self.t_end, self.dt)
+        self.time = t.tolist()
+
+        if tf.order == 1:
+            # y(t) = K·(1 − e^(−t/τ))
+            y = tf.K * (1 - np.exp(-t / tf.tau))
+
+        else:  # مرتبه دوم
+            K, zeta, wn = tf.K, tf.zeta, tf.omega_n
+            y = np.zeros(len(t))
+
+            if zeta < 0:
+                # ناپایدار — فقط محاسبه عددی
+                y = self._numerical(t)
+            elif abs(zeta - 1.0) < 1e-6:
+                # Critically damped
+                y = K * (1 - np.exp(-wn * t) * (1 + wn * t))
+            elif zeta > 1.0:
+                # Over-damped
+                s1 = -wn * (zeta - math.sqrt(zeta**2 - 1))
+                s2 = -wn * (zeta + math.sqrt(zeta**2 - 1))
+                A = s1 / (s1 - s2)
+                B = -s2 / (s1 - s2)
+                y = K * (1 - A * np.exp(s2 * t) - B * np.exp(s1 * t))
+            else:
+                # Under-damped
+                wd = wn * math.sqrt(1 - zeta**2)
+                phi = math.acos(zeta)
+                y = K * (1 - np.exp(-zeta * wn * t) *
+                         (np.cos(wd * t) + (zeta / math.sqrt(1 - zeta**2)) * np.sin(wd * t)))
+
+        self.output = y.tolist()
+
+    def _numerical(self, t_arr):
+        """یکپارچه‌سازی عددی Euler برای حالت‌های خاص."""
+        tf = self.tf
+        y = np.zeros(len(t_arr))
+        dy = 0.0
+        y_cur = 0.0
+        wn2 = tf.omega_n ** 2
+        dt = self.dt
+        for i in range(1, len(t_arr)):
+            ddy = wn2 * tf.K - 2 * tf.zeta * tf.omega_n * dy - wn2 * y_cur
+            dy += ddy * dt
+            y_cur += dy * dt
+            y[i] = y_cur
+        return y
+
+
+# ─────────────────────────────────────────────
+# کلاس Analyzer
+# ─────────────────────────────────────────────
+class Analyzer:
+    """
+    استخراج مشخصات عملکردی از پاسخ پله.
+    """
+
+    def __init__(self, time: list[float], output: list[float],
+                 tf: TransferFunction):
+        self.time = np.array(time)
+        self.output = np.array(output)
+        self.tf = tf
+        self.steady_state = tf.K  # مقدار نهایی پله واحد
+
+    def rise_time(self) -> float:
+        """زمان صعود: 10% تا 90% مقدار نهایی."""
+        ss = self.steady_state
+        if ss == 0:
+            return float('nan')
+        t10 = self._first_cross(0.10 * ss)
+        t90 = self._first_cross(0.90 * ss)
+        if t10 is None or t90 is None:
+            return float('nan')
+        return t90 - t10
+
+    def peak_time(self) -> float:
+        """زمان رسیدن به اوج."""
+        idx = int(np.argmax(self.output))
+        return float(self.time[idx])
+
+    def overshoot(self) -> float:
+        """فراجهش (%) = (y_max − y_ss) / y_ss × 100."""
+        ss = self.steady_state
+        if ss == 0:
+            return float('nan')
+        peak = float(np.max(self.output))
+        os_pct = (peak - ss) / abs(ss) * 100
+        return max(os_pct, 0.0)
+
+    def settling_time(self, band: float = 0.02) -> float:
+        """
+        زمان نشست: آخرین لحظه‌ای که خروجی از ±band·y_ss خارج بود.
+        """
+        ss = self.steady_state
+        if ss == 0:
+            return float('nan')
+        tol = abs(ss) * band
+        outside = np.where(np.abs(self.output - ss) > tol)[0]
+        if len(outside) == 0:
+            return float(self.time[0])
+        return float(self.time[outside[-1]])
+
+    def steady_state_error(self) -> float:
+        """خطای حالت ماندگار."""
+        return abs(self.steady_state - float(self.output[-1]))
+
+    def _first_cross(self, level: float):
+        idx = np.where(self.output >= level)[0]
+        return float(self.time[idx[0]]) if len(idx) > 0 else None
+
+
+# ─────────────────────────────────────────────
+# کلاس Plotter (رسم روی Canvas)
+# ─────────────────────────────────────────────
+class Plotter:
+    """
+    رسم نمودار روی tkinter Canvas.
+    """
+
+    MARGIN = {"top": 30, "bottom": 50, "left": 70, "right": 20}
+    COLORS = {
+        "bg": "#1e1e2e",
+        "grid": "#3a3a5c",
+        "axis": "#cdd6f4",
+        "curve1": "#89b4fa",   # آبی — سیستم اول
+        "curve2": "#a6e3a1",   # سبز — سیستم دوم (مقایسه)
+        "setpoint": "#f38ba8", # قرمز — مقدار نهایی
+        "text": "#cdd6f4",
+        "marker": "#fab387",
+    }
+
+    def __init__(self, canvas: tk.Canvas):
+        self.canvas = canvas
+
+    def _dims(self):
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        m = self.MARGIN
+        pw = w - m["left"] - m["right"]
+        ph = h - m["top"] - m["bottom"]
+        return w, h, m, pw, ph
+
+    def _to_px(self, t, y, t_min, t_max, y_min, y_max, m, pw, ph):
+        px = m["left"] + (t - t_min) / (t_max - t_min) * pw
+        py = m["top"] + (1 - (y - y_min) / (y_max - y_min)) * ph
+        return px, py
+
+    def draw(self, responses: list[tuple], analyses: list, labels: list[str]):
+        """
+        responses: [(time, output), ...]
+        analyses: [Analyzer, ...]
+        labels: ['سیستم ۱', ...]
+        """
+        c = self.canvas
+        c.delete("all")
+        w, h, m, pw, ph = self._dims()
+
+        if not responses:
+            return
+
+        # محدوده
+        all_t = [t for time, _ in responses for t in time]
+        all_y = [y for _, out in responses for y in out]
+        t_min, t_max = 0, max(all_t) if all_t else 1
+        y_min = min(0, min(all_y)) if all_y else 0
+        y_max = max(all_y) * 1.15 if all_y else 1
+        if y_max == y_min:
+            y_max = y_min + 1
+
+        # پس‌زمینه
+        c.create_rectangle(0, 0, w, h, fill=self.COLORS["bg"], outline="")
+        c.create_rectangle(m["left"], m["top"],
+                           m["left"] + pw, m["top"] + ph,
+                           fill="#11111b", outline=self.COLORS["grid"])
+
+        # گرید
+        for i in range(6):
+            yv = y_min + i * (y_max - y_min) / 5
+            _, py = self._to_px(0, yv, t_min, t_max, y_min, y_max, m, pw, ph)
+            c.create_line(m["left"], py, m["left"] + pw, py,
+                          fill=self.COLORS["grid"], dash=(4, 4))
+            c.create_text(m["left"] - 5, py,
+                          text=f"{yv:.2f}", anchor="e",
+                          fill=self.COLORS["text"], font=("Courier", 9))
+
+        for i in range(7):
+            tv = t_min + i * (t_max - t_min) / 6
+            px, _ = self._to_px(tv, 0, t_min, t_max, y_min, y_max, m, pw, ph)
+            c.create_line(px, m["top"], px, m["top"] + ph,
+                          fill=self.COLORS["grid"], dash=(4, 4))
+            c.create_text(px, m["top"] + ph + 15,
+                          text=f"{tv:.1f}", anchor="n",
+                          fill=self.COLORS["text"], font=("Courier", 9))
+
+        # برچسب محورها
+        c.create_text(m["left"] + pw // 2, h - 8,
+                      text="زمان (ثانیه)", fill=self.COLORS["text"],
+                      font=("Tahoma", 10))
+        c.create_text(12, m["top"] + ph // 2,
+                      text="خروجی", fill=self.COLORS["text"],
+                      font=("Tahoma", 10), angle=90)
+
+        # خط مقدار نهایی
+        if analyses:
+            ss = analyses[0].steady_state
+            _, py_ss = self._to_px(0, ss, t_min, t_max, y_min, y_max, m, pw, ph)
+            c.create_line(m["left"], py_ss, m["left"] + pw, py_ss,
+                          fill=self.COLORS["setpoint"], dash=(6, 3), width=1)
+            c.create_text(m["left"] + pw - 5, py_ss - 8,
+                          text=f"y_ss={ss:.3f}", anchor="e",
+                          fill=self.COLORS["setpoint"], font=("Courier", 9))
+
+        # منحنی‌ها
+        curve_colors = [self.COLORS["curve1"], self.COLORS["curve2"],
+                        "#cba6f7", "#f9e2af"]
+        for idx, ((time, output), label) in enumerate(zip(responses, labels)):
+            color = curve_colors[idx % len(curve_colors)]
+            pts = []
+            for t, y in zip(time, output):
+                px, py = self._to_px(t, y, t_min, t_max, y_min, y_max, m, pw, ph)
+                pts.extend([px, py])
+            if len(pts) >= 4:
+                c.create_line(*pts, fill=color, width=2, smooth=True)
+            # legend
+            lx = m["left"] + 10 + idx * 160
+            ly = m["top"] + 10
+            c.create_line(lx, ly + 5, lx + 30, ly + 5, fill=color, width=2)
+            c.create_text(lx + 35, ly + 5, text=label, anchor="w",
+                          fill=color, font=("Tahoma", 9))
+
+        # نشانگر زمان نشست
+        if analyses:
+            for idx, an in enumerate(analyses):
+                color = curve_colors[idx % len(curve_colors)]
+                ts = an.settling_time()
+                if not math.isnan(ts):
+                    px, _ = self._to_px(ts, 0, t_min, t_max, y_min, y_max, m, pw, ph)
+                    c.create_line(px, m["top"], px, m["top"] + ph,
+                                  fill=color, dash=(2, 6), width=1)
+                    c.create_text(px + 3, m["top"] + 5,
+                                  text=f"Ts={ts:.2f}", anchor="nw",
+                                  fill=color, font=("Courier", 8))
+
+
+# ─────────────────────────────────────────────
+# رابط گرافیکی GUI
+# ─────────────────────────────────────────────
+class GUI:
+    STUDENT_ID = "03220040709006"
+    A = 6
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title(f"تحلیل پاسخ سیستم‌های کنترل | a={self.A} | {self.STUDENT_ID}")
+        self.root.configure(bg="#1e1e2e")
+        self.root.geometry("1100x720")
+        self.root.resizable(True, True)
+
+        # داده‌های فعلی
+        self._responses: list[tuple] = []
+        self._analyses: list[Analyzer] = []
+        self._labels: list[str] = []
+
+        self._build_ui()
+
+    # ── ساخت UI ──────────────────────────────
+    def _build_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background="#1e1e2e", foreground="#cdd6f4",
+                        font=("Tahoma", 10))
+        style.configure("TFrame", background="#1e1e2e")
+        style.configure("TLabelframe", background="#1e1e2e", foreground="#89b4fa")
+        style.configure("TLabelframe.Label", background="#1e1e2e",
+                        foreground="#89b4fa", font=("Tahoma", 10, "bold"))
+        style.configure("TButton", font=("Tahoma", 10), padding=5)
+        style.configure("TEntry", fieldbackground="#313244",
+                        foreground="#cdd6f4", font=("Courier", 11))
+        style.configure("TNotebook", background="#1e1e2e")
+        style.configure("TNotebook.Tab", background="#313244",
+                        foreground="#cdd6f4", font=("Tahoma", 10))
+
+        # ── نوار بالا
+        top = tk.Frame(self.root, bg="#181825", height=40)
+        top.pack(fill="x")
+        tk.Label(top, text=f"  نرم‌افزار تحلیل پاسخ سیستم‌های کنترل  |  "
+                            f"شماره دانشجویی: {self.STUDENT_ID}  |  a = {self.A}",
+                 bg="#181825", fg="#89b4fa",
+                 font=("Tahoma", 11, "bold")).pack(side="left", pady=5)
+
+        # ── چیدمان اصلی
+        main = ttk.Frame(self.root)
+        main.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # پانل چپ
+        left = ttk.Frame(main, width=300)
+        left.pack(side="left", fill="y", padx=(0, 6))
+        left.pack_propagate(False)
+
+        # نمودار
+        right = ttk.Frame(main)
+        right.pack(side="left", fill="both", expand=True)
+
+        self._build_input_panel(left)
+        self._build_plot_area(right)
+        self._build_results_panel(left)
+
+    def _lbl(self, parent, text, row, col=0, **kw):
+        ttk.Label(parent, text=text).grid(row=row, column=col,
+                                          sticky="w", pady=2, padx=4, **kw)
+
+    def _entry(self, parent, row, col=1, width=12, default=""):
+        v = tk.StringVar(value=default)
+        e = ttk.Entry(parent, textvariable=v, width=width)
+        e.grid(row=row, column=col, sticky="ew", pady=2, padx=4)
+        return v
+
+    def _build_input_panel(self, parent):
+        # ── انتخاب مرتبه
+        ord_frame = ttk.LabelFrame(parent, text="مرتبه سیستم", padding=8)
+        ord_frame.pack(fill="x", pady=(0, 6))
+
+        self._order_var = tk.IntVar(value=2)
+        ttk.Radiobutton(ord_frame, text="مرتبه اول",
+                        variable=self._order_var, value=1,
+                        command=self._on_order_change).pack(side="left", padx=10)
+        ttk.Radiobutton(ord_frame, text="مرتبه دوم",
+                        variable=self._order_var, value=2,
+                        command=self._on_order_change).pack(side="left", padx=10)
+
+        # ── پارامترها
+        p_frame = ttk.LabelFrame(parent, text="پارامترهای سیستم", padding=8)
+        p_frame.pack(fill="x", pady=(0, 6))
+        p_frame.columnconfigure(1, weight=1)
+
+        self._lbl(p_frame, "K  (بهره):", 0)
+        self._K = self._entry(p_frame, 0, default="1.0")
+
+        self._lbl(p_frame, "ζ  (میرایی):", 1)
+        self._zeta = self._entry(p_frame, 1, default="0.5")
+
+        self._lbl(p_frame, "ωn  (rad/s):", 2)
+        self._wn = self._entry(p_frame, 2, default="2.0")
+
+        self._lbl(p_frame, "τ  (ثابت زمانی):", 3)
+        self._tau_var = self._entry(p_frame, 3, default="1.0")
+
+        self._tau_label = p_frame.grid_slaves(row=3, column=0)[0]
+        self._tau_entry = p_frame.grid_slaves(row=3, column=1)[0]
+        self._zeta_label = p_frame.grid_slaves(row=1, column=0)[0]
+        self._zeta_entry = p_frame.grid_slaves(row=1, column=1)[0]
+        self._wn_label = p_frame.grid_slaves(row=2, column=0)[0]
+        self._wn_entry = p_frame.grid_slaves(row=2, column=1)[0]
+
+        # ── شبیه‌سازی
+        sim_frame = ttk.LabelFrame(parent, text="تنظیمات شبیه‌سازی", padding=8)
+        sim_frame.pack(fill="x", pady=(0, 6))
+        sim_frame.columnconfigure(1, weight=1)
+
+        self._lbl(sim_frame, "زمان پایان (s):", 0)
+        self._t_end = self._entry(sim_frame, 0, default="20.0")
+
+        self._lbl(sim_frame, "گام زمانی (s):", 1)
+        self._dt = self._entry(sim_frame, 1, default="0.01")
+
+        # ── دکمه‌ها
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(fill="x", pady=4)
+
+        tk.Button(btn_frame, text="▶  تحلیل",
+                  bg="#89b4fa", fg="#1e1e2e",
+                  font=("Tahoma", 11, "bold"),
+                  relief="flat", padx=10, pady=6,
+                  command=self._run_analysis).pack(side="left", expand=True,
+                                                   fill="x", padx=2)
+
+        tk.Button(btn_frame, text="➕  افزودن به نمودار",
+                  bg="#a6e3a1", fg="#1e1e2e",
+                  font=("Tahoma", 10),
+                  relief="flat", padx=6, pady=6,
+                  command=self._add_to_plot).pack(side="left", expand=True,
+                                                  fill="x", padx=2)
+
+        tk.Button(btn_frame, text="🗑  پاک",
+                  bg="#f38ba8", fg="#1e1e2e",
+                  font=("Tahoma", 10),
+                  relief="flat", padx=6, pady=6,
+                  command=self._clear_plot).pack(side="left", padx=2)
+
+        self._on_order_change()
+
+    def _build_plot_area(self, parent):
+        plot_frame = ttk.LabelFrame(parent, text="نمودار پاسخ پله", padding=4)
+        plot_frame.pack(fill="both", expand=True)
+
+        self._canvas = tk.Canvas(plot_frame, bg="#1e1e2e",
+                                 highlightthickness=0)
+        self._canvas.pack(fill="both", expand=True)
+        self._plotter = Plotter(self._canvas)
+        self._canvas.bind("<Configure>", lambda e: self._redraw())
+
+    def _build_results_panel(self, parent):
+        res_frame = ttk.LabelFrame(parent, text="نتایج تحلیل", padding=8)
+        res_frame.pack(fill="both", expand=True, pady=(6, 0))
+
+        metrics = [
+            ("زمان صعود (Tr):", "tr"),
+            ("زمان اوج (Tp):", "tp"),
+            ("فراجهش (OS%):", "os"),
+            ("زمان نشست ۲٪ (Ts):", "ts"),
+            ("خطای ماندگار:", "sse"),
+            ("مقدار نهایی (y_ss):", "yss"),
+        ]
+        self._result_vars: dict[str, tk.StringVar] = {}
+        for i, (lbl, key) in enumerate(metrics):
+            ttk.Label(res_frame, text=lbl).grid(row=i, column=0,
+                                                sticky="w", pady=1)
+            v = tk.StringVar(value="—")
+            ttk.Label(res_frame, textvariable=v,
+                      foreground="#89b4fa",
+                      font=("Courier", 10, "bold")).grid(row=i, column=1,
+                                                          sticky="w", padx=8)
+            self._result_vars[key] = v
+
+    # ── رویدادها ────────────────────────────
+    def _on_order_change(self):
+        order = self._order_var.get()
+        if order == 1:
+            self._zeta_label.grid_remove()
+            self._zeta_entry.grid_remove()
+            self._wn_label.grid_remove()
+            self._wn_entry.grid_remove()
+            self._tau_label.grid()
+            self._tau_entry.grid()
+        else:
+            self._tau_label.grid_remove()
+            self._tau_entry.grid_remove()
+            self._zeta_label.grid()
+            self._zeta_entry.grid()
+            self._wn_label.grid()
+            self._wn_entry.grid()
+
+    def _parse_params(self):
+        try:
+            K = float(self._K.get())
+            t_end = float(self._t_end.get())
+            dt = float(self._dt.get())
+            order = self._order_var.get()
+            zeta = float(self._zeta.get())
+            wn = float(self._wn.get())
+            tau = float(self._tau_var.get())
+            return order, K, zeta, wn, tau, t_end, dt
+        except ValueError:
+            messagebox.showerror("خطا", "مقادیر ورودی صحیح نیستند.")
+            return None
+
+    def _compute(self):
+        params = self._parse_params()
+        if params is None:
+            return None, None
+        order, K, zeta, wn, tau, t_end, dt = params
+        tf = TransferFunction(order, K, zeta=zeta, omega_n=wn, tau=tau)
+        sr = StepResponse(tf, t_end=t_end, dt=dt)
+        sr.compute()
+        an = Analyzer(sr.time, sr.output, tf)
+        return sr, an
+
+    def _update_results(self, an: Analyzer):
+        def fmt(v):
+            return f"{v:.4f}" if not math.isnan(v) and not math.isinf(v) else "—"
+
+        self._result_vars["tr"].set(fmt(an.rise_time()) + " s")
+        self._result_vars["tp"].set(fmt(an.peak_time()) + " s")
+        self._result_vars["os"].set(fmt(an.overshoot()) + " %")
+        self._result_vars["ts"].set(fmt(an.settling_time()) + " s")
+        self._result_vars["sse"].set(fmt(an.steady_state_error()))
+        self._result_vars["yss"].set(f"{an.steady_state:.4f}")
+
+    def _run_analysis(self):
+        sr, an = self._compute()
+        if sr is None:
+            return
+        self._responses = [(sr.time, sr.output)]
+        self._analyses = [an]
+        self._labels = [self._make_label()]
+        self._update_results(an)
+        self._redraw()
+
+    def _add_to_plot(self):
+        sr, an = self._compute()
+        if sr is None:
+            return
+        self._responses.append((sr.time, sr.output))
+        self._analyses.append(an)
+        self._labels.append(self._make_label())
+        self._redraw()
+
+    def _clear_plot(self):
+        self._responses.clear()
+        self._analyses.clear()
+        self._labels.clear()
+        for v in self._result_vars.values():
+            v.set("—")
+        self._redraw()
+
+    def _make_label(self):
+        order = self._order_var.get()
+        K = self._K.get()
+        if order == 1:
+            return f"مرتبه۱ K={K} τ={self._tau_var.get()}"
+        return f"مرتبه۲ K={K} ζ={self._zeta.get()} ωn={self._wn.get()}"
+
+    def _redraw(self):
+        self._plotter.draw(self._responses, self._analyses, self
